@@ -12,7 +12,7 @@ cardinal/query-execution/
 ├── config.py              # Configuration loader
 ├── setup_db.py            # Database setup script
 ├── query_executor.py      # Simple query executor
-├── interactive_executor.py # Interactive CLI tool
+├── executor_cli.py # Interactive CLI tool
 ├── data/                  # Directory for data files
 ├── results/               # Directory for results
 └── logs/                  # Directory for log files
