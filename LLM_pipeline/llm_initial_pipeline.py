@@ -18,10 +18,10 @@ def load_llm_model(model_name="gpt2"):
         # You can switch to a specific task like 'text2text-generation' if using T5/BART
         # For generic LLMs, 'text-generation' is common.
         # device=-1 means CPU, set to 0 for GPU if available
-        device = 0 if torch.cuda.is_available() else -1
-        print(f"Using device: {'CUDA' if device == 0 else 'CPU'}")
+        # device = 0 if torch.cuda.is_available() else -1
+        # print(f"Using device: {'CUDA' if device == 0 else 'CPU'}")
         generator = pipeline(
-            'text-generation', model=model_name, device=device)
+            'text-generation', model=model_name, device_map="auto")
         return generator
     except ImportError:
         print("Error: 'transformers' or 'torch' library not found.")
