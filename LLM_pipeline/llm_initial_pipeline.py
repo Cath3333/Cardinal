@@ -40,15 +40,24 @@ def generate_query_plan(query, model):
     # You might need to provide schema information or specific instructions
     # depending on the model and the database system (e.g., PostgreSQL EXPLAIN format).
     prompt = (
-        f"You are a database expert. Generate a valid postgres SQL query execution plan for the following query.\n"
+        f"You are a database expert. Generate a PostgreSQL execution plan in JSON format for the following query.\n"
+        f"The JSON must strictly follow the standard EXPLAIN (FORMAT JSON) structure with 'Node Type', 'Relation Name', and 'Plans' fields.\n"
+        f"IMPORTANT: You can omit cost, rows, width, and other metadata to save space. Focus on the tree structure and node types.\n"
+        f"Output ONLY the JSON object.\n\n"
+        f"Example 1:\n"
+        f"Query: SELECT * FROM users WHERE id = 1;\n"
+        f"Plan JSON: [{{ \"Plan\": {{ \"Node Type\": \"Index Scan\", \"Relation Name\": \"users\", \"Alias\": \"users\", \"Index Name\": \"users_pkey\" }} }}]\n\n"
+        f"Example 2:\n"
+        f"Query: SELECT u.name, p.title FROM users u JOIN posts p ON u.id = p.user_id;\n"
+        f"Plan JSON: [{{ \"Plan\": {{ \"Node Type\": \"Hash Join\", \"Join Type\": \"Inner\", \"Plans\": [ {{ \"Node Type\": \"Seq Scan\", \"Relation Name\": \"users\", \"Alias\": \"u\" }}, {{ \"Node Type\": \"Hash\", \"Plans\": [ {{ \"Node Type\": \"Seq Scan\", \"Relation Name\": \"posts\", \"Alias\": \"p\" }} ] }} ] }} }}]\n\n"
         f"Query: {query}\n"
-        f"Plan:"
+        f"Plan JSON:"
     )
 
     try:
         # Generate response
         # max_new_tokens controls the length osql_f the generated output
-        response = model(prompt, max_new_tokens=150,
+        response = model(prompt,
                          num_return_sequences=1, do_sample=True, temperature=0.7)
         generated_text = response[0]['generated_text']
 
@@ -80,6 +89,11 @@ def process_csv(input_file, output_file, query_column, model_name, limit=None):
         print(f"Limiting to first {limit} rows.")
         df = df.head(limit)
 
+    # If 'plan_json' already exists, rename it to 'original_plan_json' to avoid overwriting
+    if 'plan_json' in df.columns:
+        print("Renaming existing 'plan_json' column to 'original_plan_json'...")
+        df.rename(columns={'plan_json': 'original_plan_json'}, inplace=True)
+
     # Load the model once
     model = load_llm_model(model_name)
 
@@ -90,7 +104,7 @@ def process_csv(input_file, output_file, query_column, model_name, limit=None):
 
     # Apply the generation function to each row
     # We use a lambda to pass the model instance
-    df['generated_query_plan'] = df[query_column].progress_apply(
+    df['plan_json'] = df[query_column].progress_apply(
         lambda q: generate_query_plan(q, model))
 
     print(f"Saving results to {output_file}...")
