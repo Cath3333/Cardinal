@@ -6,6 +6,7 @@ Interactive command-line interface for PostgreSQL query execution and benchmarki
 import sys
 import argparse
 from query_executor import SimpleQueryExecutor
+from plan_to_hints import plan_to_hints, plan_to_hints_verbose
 from config import DB_CONFIG
 import json
 
@@ -20,10 +21,35 @@ def print_results(result_dict, title="Results"):
             )
         elif key == "results":
             print(f"{key}: {value} (showing first 5 rows)")
+        elif key == "extracted_hints":
+            print(f"{key}: {value}")
+        elif key == "hint_details":
+            print(f"{key}:")
+            for hint_type, hints in value.items():
+                if hints:
+                    print(f"    {hint_type}: {hints}")
         elif isinstance(value, float):
             print(f"{key}: {value:.2f}")
         else:
             print(f"{key}: {value}")
+    print()
+
+
+def print_hints_from_plan(plan_json, verbose=False):
+    """Pretty print extracted hints from an execution plan"""
+    print("\n=== Extracted pg_hint_plan Hints ===")
+
+    if verbose:
+        result = plan_to_hints_verbose(plan_json)
+        print(f"Hint string: {result['hint_string']}")
+        print(f"\nBreakdown:")
+        print(f"  Scan hints: {result.get('scan_hints', [])}")
+        print(f"  Join hints: {result.get('join_hints', [])}")
+        print(f"  Index hints: {result.get('index_hints', [])}")
+    else:
+        hints = plan_to_hints(plan_json)
+        print(f"Hints: {hints}")
+
     print()
 
 
@@ -65,6 +91,9 @@ def interactive_mode():
     print("Type 'quit' or 'exit' to end the session.")
     print("Type 'help' for available commands.\n")
 
+    # Store the last execution plan for plan-to-hints conversion
+    last_plan = None
+
     while True:
         try:
             # Get query from user
@@ -81,9 +110,18 @@ def interactive_mode():
 
             if query.lower() in ["help", "h"]:
                 print("\nAvailable commands:")
-                print("  help, h          - Show this help message")
-                print("  quit, exit, q    - Exit the program")
-                print("  clear, cls       - Clear the screen")
+                print("  help, h              - Show this help message")
+                print("  quit, exit, q        - Exit the program")
+                print("  clear, cls           - Clear the screen")
+                print(
+                    "  hints                - Extract pg_hint_plan hints from last execution plan"
+                )
+                print(
+                    "  hints <json>         - Extract hints from provided plan JSON"
+                )
+                print(
+                    "  replay               - Re-execute last query with extracted hints"
+                )
                 print(
                     "\nTo execute a query with hints, you'll be prompted for hints after entering the query."
                 )
@@ -98,9 +136,47 @@ def interactive_mode():
                 os.system("cls" if os.name == "nt" else "clear")
                 continue
 
+            # Handle 'hints' command - extract hints from last or provided plan
+            if query.lower() == "hints":
+                if last_plan:
+                    print_hints_from_plan(last_plan, verbose=True)
+                else:
+                    print("No execution plan available. Run a query first.")
+                continue
+
+            if query.lower().startswith("hints "):
+                try:
+                    plan_json_str = query[6:].strip()
+                    plan_json = json.loads(plan_json_str)
+                    print_hints_from_plan(plan_json, verbose=True)
+                except json.JSONDecodeError as e:
+                    print(f"Invalid JSON: {e}")
+                continue
+
+            # Handle 'replay' command - re-execute with extracted hints
+            if query.lower() == "replay":
+                if not last_plan:
+                    print("No execution plan available. Run a query first.")
+                    continue
+                # We need to store the last query too
+                print(
+                    "Replay command requires a stored query. Please run a query first."
+                )
+                continue
+
             # Get optional hints
             print("\nEnter PostgreSQL hints (optional, press Enter to skip):")
-            hints = input("Hints: ").strip()
+            print(
+                "  Or type 'auto' to extract hints from current plan and apply them"
+            )
+            hints_input = input("Hints: ").strip()
+
+            hints = None
+            if hints_input.lower() == "auto" and last_plan:
+                hints = plan_to_hints(last_plan)
+                print(f"Auto-extracted hints: {hints}")
+            elif hints_input and hints_input.lower() != "auto":
+                hints = hints_input
 
             # Get benchmark iterations
             iterations_input = input(
@@ -129,6 +205,14 @@ def interactive_mode():
                 print(f"Error executing query: {plan_result['error']}")
                 continue
 
+            # Store the plan for later hint extraction
+            if plan_result.get("execution_plan"):
+                last_plan = plan_result["execution_plan"]
+
+                # Extract and show hints
+                extracted_hints = plan_to_hints(last_plan)
+                plan_result["extracted_hints"] = extracted_hints
+
             print_results(plan_result, "Execution Plan Analysis")
 
             # Show readable execution plan
@@ -136,6 +220,13 @@ def interactive_mode():
                 print("=== Execution Plan Tree ===")
                 plan_data = plan_result["execution_plan"]["Plan"]
                 print_execution_plan(plan_data)
+                print()
+
+                # Show extracted hints
+                print("=== Extracted pg_hint_plan Hints ===")
+                print(
+                    f"To replay this plan: {plan_result.get('extracted_hints', 'N/A')}"
+                )
                 print()
 
             # Run benchmark
@@ -160,9 +251,21 @@ def interactive_mode():
             print("Continuing...")
 
 
-def single_query_mode(query, hints=None, iterations=3, verbose=False):
+def single_query_mode(
+    query, hints=None, iterations=3, verbose=False, plan_json=None
+):
     """Execute a single query and return results"""
     executor = SimpleQueryExecutor()
+
+    # If plan_json provided, extract hints from it
+    if plan_json:
+        print("Extracting hints from provided execution plan...")
+        extracted = plan_to_hints(plan_json)
+        print(f"Extracted hints: {extracted}")
+        if not hints:
+            hints = extracted
+            print("Using extracted hints for execution.")
+        print()
 
     print(f"Executing query: {query}")
     if hints:
@@ -179,6 +282,10 @@ def single_query_mode(query, hints=None, iterations=3, verbose=False):
         print(f"Error: {result['error']}")
         return
 
+    # Extract hints from the result plan
+    if result.get("execution_plan"):
+        result["extracted_hints"] = plan_to_hints(result["execution_plan"])
+
     # Print execution plan results
     print_results(result, "Execution Plan Analysis")
 
@@ -192,6 +299,11 @@ def single_query_mode(query, hints=None, iterations=3, verbose=False):
         plan_data = result["execution_plan"]["Plan"]
         print_execution_plan(plan_data)
         print()
+
+    # Always show extracted hints
+    if result.get("execution_plan"):
+        print("=== Extracted pg_hint_plan Hints ===")
+        print_hints_from_plan(result["execution_plan"], verbose=verbose)
 
     # Run benchmark
     if iterations > 1:
@@ -209,16 +321,42 @@ def single_query_mode(query, hints=None, iterations=3, verbose=False):
 
 def main():
     """Main entry point with command line argument parsing"""
-    parser = argparse.ArgumentParser(
+    #     parser = argparse.ArgumentParser(
+    #         description="Interactive PostgreSQL Query Executor and Benchmarker",
+    #         formatter_class=argparse.RawDescriptionHelpFormatter,
+    #         epilog="""
+    # Examples:
+    #   python executor_cli.py                           # Interactive mode
+    #   python executor_cli.py -q "SELECT * FROM users" # Single query
+    #   python executor_cli.py -q "SELECT * FROM users" --hints "/*+ SeqScan(users) */"
+    #   python executor_cli.py -q "SELECT * FROM users" -i 5 --verbose
+
+    # Plan-to-Hints Examples:
+    #   python executor_cli.py --plan-to-hints '[{"Plan": {...}}]'  # Extract hints from plan JSON
+    #   python executor_cli.py --plan-file plan.json                # Extract hints from plan file
+    #   python executor_cli.py -q "SELECT ..." --plan-file plan.json  # Execute with extracted hints
+    #         """,
+    #     )
+    class CustomArgumentParser(argparse.ArgumentParser):
+        def error(self, message):
+            """Override error to show simplified message"""
+            # Truncate long unrecognized arguments messages
+            if "unrecognized arguments:" in message:
+                parts = message.split("unrecognized arguments:", 1)
+                if len(parts) == 2 and len(parts[1]) > 100:
+                    message = (
+                        parts[0]
+                        + "unrecognized arguments: "
+                        + parts[1][:100]
+                        + "..."
+                    )
+            sys.stderr.write(f"\n\nerror: {message}\n")
+            self.print_help()
+            sys.exit(2)
+
+    parser = CustomArgumentParser(
         description="Interactive PostgreSQL Query Executor and Benchmarker",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python executor_cli.py                           # Interactive mode
-  python executor_cli.py -q "SELECT * FROM users" # Single query
-  python executor_cli.py -q "SELECT * FROM users" --hints "/*+ SeqScan(users) */"
-  python executor_cli.py -q "SELECT * FROM users" -i 5 --verbose
-        """,
     )
 
     parser.add_argument(
@@ -243,6 +381,15 @@ Examples:
         action="store_true",
         help="Show detailed execution plan JSON",
     )
+    parser.add_argument(
+        "--plan-to-hints",
+        dest="plan_json",
+        help="Extract pg_hint_plan hints from execution plan JSON string",
+    )
+    parser.add_argument(
+        "--plan-file",
+        help="Extract pg_hint_plan hints from execution plan JSON file",
+    )
 
     args = parser.parse_args()
 
@@ -251,10 +398,35 @@ Examples:
         print("Iterations must be between 1 and 20")
         return 1
 
+    # Handle plan-to-hints mode (standalone)
+    plan_json = None
+    if args.plan_file:
+        try:
+            with open(args.plan_file, "r") as f:
+                plan_json = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: Plan file not found: {args.plan_file}")
+            return 1
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in plan file: {e}")
+            return 1
+    elif args.plan_json:
+        try:
+            plan_json = json.loads(args.plan_json)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON: {e}")
+            return 1
+
+    # If only plan provided (no query), just extract and print hints
+    if plan_json and not args.query:
+        print("=== Plan-to-Hints Conversion ===\n")
+        print_hints_from_plan(plan_json, verbose=args.verbose)
+        return 0
+
     # Run in single query mode if query provided
     if args.query:
         single_query_mode(
-            args.query, args.hints, args.iterations, args.verbose
+            args.query, args.hints, args.iterations, args.verbose, plan_json
         )
     else:
         # Run in interactive mode
